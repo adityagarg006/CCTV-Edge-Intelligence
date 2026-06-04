@@ -120,9 +120,9 @@ class TestUpsertIdentity:
         row = db._conn.execute(
             "SELECT total_detections, best_confidence FROM identities WHERE reid_id = 5"
         ).fetchone()
-        assert row["total_detections"] == 2
-        # best_confidence should track the maximum seen.
-        assert pytest.approx(row["best_confidence"], abs=1e-3) == 0.8
+        # row is a plain tuple — (total_detections, best_confidence)
+        assert row[0] == 2
+        assert pytest.approx(row[1], abs=1e-3) == 0.8
         db.close()
 
     def test_second_upsert_updates_last_seen(self, tmp_path):
@@ -139,8 +139,9 @@ class TestUpsertIdentity:
         row = db._conn.execute(
             "SELECT first_seen, last_seen FROM identities WHERE reid_id = 3"
         ).fetchone()
-        assert pytest.approx(row["first_seen"], abs=0.01) == ts
-        assert pytest.approx(row["last_seen"], abs=0.01) == later_ts
+        # row is a plain tuple — (first_seen, last_seen)
+        assert pytest.approx(row[0], abs=0.01) == ts
+        assert pytest.approx(row[1], abs=0.01) == later_ts
         db.close()
 
 

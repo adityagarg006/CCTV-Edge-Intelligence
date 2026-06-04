@@ -26,6 +26,11 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+try:
+    from ultralytics import YOLO
+except ImportError:  # pragma: no cover
+    YOLO = None  # type: ignore[assignment,misc]
+
 
 @dataclasses.dataclass(frozen=True)
 class Detection:
@@ -76,8 +81,8 @@ class PersonDetector:
         self._last_result: list[Detection] = []
 
         try:
-            from ultralytics import YOLO
-
+            if YOLO is None:
+                raise ImportError("ultralytics is not installed. Run: pip install ultralytics")
             self._model = YOLO(settings.YOLO_MODEL)
             logger.info(
                 "PersonDetector loaded model=%r on device=%r frame_skip=%d",

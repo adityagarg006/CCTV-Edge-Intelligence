@@ -44,8 +44,7 @@ def _build_detector_with_mock_yolo(track_results=None, frame_skip: int = 1) -> P
     mock_model = MagicMock()
     mock_model.track.return_value = track_results
 
-    with patch("src.detector.YOLO", return_value=mock_model), \
-         patch("ultralytics.YOLO", return_value=mock_model, create=True):
+    with patch("src.detector.YOLO", return_value=mock_model):
         detector = PersonDetector(device="cpu", frame_skip=frame_skip)
         detector._model = mock_model  # ensure the right mock is in place
 
