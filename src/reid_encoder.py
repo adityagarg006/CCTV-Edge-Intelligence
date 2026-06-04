@@ -119,6 +119,10 @@ class ReIDEncoder:
     def _load_model(self) -> tuple[nn.Module, int]:
         """Load OSNet or fall back to MobileNetV3-Small.
 
+        Never hard-code embed_dim — always probe the model with a real forward
+        pass so the FAISS index is initialised to the correct dimension regardless
+        of torchreid version or model variant.
+
         Returns:
             Tuple of (model, embedding_dimension).
         """
@@ -130,23 +134,41 @@ class ReIDEncoder:
                 num_classes=1000,
                 pretrained=True,
             )
-            # Strip the classifier head; OSNet's feature extractor outputs 256-dim.
+            # torchreid's OSNet returns features before the classifier in eval
+            # mode, so Identity() is only needed as a safeguard; the real
+            # dimensionality comes from feature_dim (512 for osnet_x0_25).
             model.classifier = nn.Identity()
-            embed_dim = 256
-            logger.info("Loaded OSNet x0.25 (embed_dim=256) via torchreid.")
+            model.eval()
+            embed_dim = self._probe_dim(model)
+            logger.info("Loaded OSNet x0.25 (embed_dim=%d) via torchreid.", embed_dim)
             return model, embed_dim
 
         except ImportError:
             logger.warning(
-                "torchreid not found; falling back to MobileNetV3-Small (576-dim). "
-                "Expect ~8%% lower Re-ID accuracy. "
+                "torchreid not found; falling back to MobileNetV3-Small. "
+                "Expect lower Re-ID accuracy. "
                 "Install: pip install git+https://github.com/KaiyangZhou/deep-person-reid.git"
             )
             import torchvision
 
             model = torchvision.models.mobilenet_v3_small(weights="DEFAULT")
-            # MobileNetV3-Small's classifier input is 576-dim after AdaptiveAvgPool.
             model.classifier = nn.Identity()
-            embed_dim = 576
-            logger.info("Loaded MobileNetV3-Small (embed_dim=576) as Re-ID fallback.")
+            model.eval()
+            embed_dim = self._probe_dim(model)
+            logger.info("Loaded MobileNetV3-Small (embed_dim=%d) as Re-ID fallback.", embed_dim)
             return model, embed_dim
+
+    @staticmethod
+    def _probe_dim(model: nn.Module) -> int:
+        """Run a single dummy forward pass to discover the output dimension.
+
+        Args:
+            model: An nn.Module in eval mode.
+
+        Returns:
+            Integer output feature dimension.
+        """
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, _CROP_H, _CROP_W)
+            out = model(dummy)
+        return int(out.shape[1])

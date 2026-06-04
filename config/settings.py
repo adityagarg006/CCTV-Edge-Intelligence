@@ -36,15 +36,15 @@ FRAME_QUEUE_MAXSIZE: int = int(os.getenv("FRAME_QUEUE_MAXSIZE", "32"))
 
 # --- Re-ID ---
 # L2 distance threshold for gallery matching.
-# MobileNetV3 fallback (no torchreid): co-occurring different people can be as
-# close as 0.55 in embedding space. Active-exclusion filtering handles the
-# "two people visible at once" case, but we still need a tight threshold for
-# cases where two people who have both left the scene are later compared.
-# 0.50 keeps same-person matches (~0.45 typical) while rejecting most false
-# positives. With OSNet installed, raise this to 0.65–0.70.
-REID_DISTANCE_THRESHOLD: float = float(os.getenv("REID_DISTANCE_THRESHOLD", "0.50"))
+# With OSNet x0.25 (torchreid installed):
+#   same person ~0.25–0.45, different people ~0.55–1.10 → threshold 0.55 is safe.
+# With MobileNetV3 fallback (no torchreid):
+#   same person ~0.40–0.60, different people ~0.55–1.10 → overlap! Use 0.45.
+#   Active-exclusion filtering handles co-visible people; this threshold only
+#   affects returning-person matching against the exited-track gallery.
+REID_DISTANCE_THRESHOLD: float = float(os.getenv("REID_DISTANCE_THRESHOLD", "0.55"))
 # EMA alpha for gallery updates [0–1]. Higher = gallery changes slowly (stable but slow to adapt).
-# Lowered from 0.9 to 0.7 so the gallery adapts faster to pose/lighting changes.
+# 0.7 (vs old 0.9) lets the gallery adapt faster to pose/lighting changes.
 REID_EMA_ALPHA: float = float(os.getenv("REID_EMA_ALPHA", "0.7"))
 # Update gallery every N frames per track. Lower = fresher embeddings, higher CPU.
 REID_GALLERY_UPDATE_FREQ: int = int(os.getenv("REID_GALLERY_UPDATE_FREQ", "5"))
