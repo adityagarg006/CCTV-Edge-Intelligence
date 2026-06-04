@@ -197,6 +197,70 @@ CCTV-Edge-Intelligence/
 
 ---
 
+## Benchmarks
+
+The `benchmarks/` package provides a component-level and end-to-end benchmarking suite.
+All numeric values in reports are runtime-computed — no hardcoded numbers.
+
+### Running benchmarks
+
+```bash
+# Full suite on CPU (all components):
+make bench
+
+# Full suite on GPU:
+make bench-gpu
+
+# Single component (detector, reid, feature_bank, database, stream_reader, pipeline):
+make bench-component COMPONENT=detector
+
+# Fast subset (no video generation, no heavy model load):
+make bench-fast
+
+# Direct CLI:
+python benchmarks/run.py --device cpu --output-dir reports
+python benchmarks/run.py --device cuda --component pipeline --frame-skip 1
+bash scripts/run_benchmarks.sh --device cuda
+```
+
+### What is measured
+
+| Benchmark | Metrics |
+|---|---|
+| `bench_detector` | Cold-start ms, warm p50/p90/p95/p99, throughput fps |
+| `bench_reid` | Batch-size sweep [1,2,4,8,16]: per-batch and per-crop latency, L2 norm check |
+| `bench_feature_bank` | Gallery sizes [10..1000]: update/query latency in microseconds, memory estimate |
+| `bench_database` | Flush interval sweep [1,10,30,100]: WAL vs no-WAL throughput, concurrent read latency |
+| `bench_stream_reader` | Queue sizes x consumer delays: file source fps, drop-oldest drop rate |
+| `bench_pipeline` | Per-stage (detection, crop_extract, reid_encode, faiss_query, db_write), SLA compliance |
+
+### Report outputs
+
+Each run writes three files to `reports/`:
+
+| File | Format | Contents |
+|---|---|---|
+| `benchmark_report_<ts>.json` | JSON | Full nested results from every component |
+| `benchmark_summary_<ts>.csv` | CSV | Flat metric table for spreadsheet analysis |
+| `benchmark_summary_<ts>.md` | Markdown | Human-readable table, auto-embeddable in PRs |
+
+### SLA targets
+
+| Target | Threshold | Rationale |
+|---|---|---|
+| GPU real-time | ≤ 50ms | 20 fps pipeline budget |
+| CPU graceful degradation | ≤ 150ms | Matches frame_skip=3 at ~6 fps |
+
+### Running benchmark tests
+
+```bash
+pytest tests/test_benchmarks.py -v
+```
+
+All benchmark tests run on CPU without requiring GPU or model weights.
+
+---
+
 ## Contributing
 
 Fork the repository and create a pull request against `main`. Please run `make lint` and `make test` before submitting — all tests must pass on CPU with mocked models. The CI pipeline enforces Python 3.10–3.12 compatibility; avoid syntax or library features not available in 3.10.
