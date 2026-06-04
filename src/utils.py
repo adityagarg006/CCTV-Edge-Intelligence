@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
 from typing import TYPE_CHECKING
 
 import cv2
@@ -172,6 +173,7 @@ def setup_logging(log_level: str = "INFO", log_file: str | None = None) -> None:
     root.addHandler(console_handler)
 
     if log_file:
+        os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
             log_file,
             maxBytes=10 * 1024 * 1024,  # 10 MB
