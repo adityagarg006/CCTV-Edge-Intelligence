@@ -1,13 +1,10 @@
 """Tests for AsyncVideoReader — no real camera or GPU required."""
 from __future__ import annotations
 
-import queue
-import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from src.stream_reader import AsyncVideoReader
 

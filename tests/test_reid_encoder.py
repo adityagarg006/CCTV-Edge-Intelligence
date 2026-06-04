@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -93,9 +93,6 @@ class TestFallbackPath:
             # Reload to force _load_model to re-run.
             import importlib
             import src.reid_encoder as reid_mod
-
-            # Temporarily block the import.
-            original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else None
 
             # Directly test by patching builtins.
             import builtins

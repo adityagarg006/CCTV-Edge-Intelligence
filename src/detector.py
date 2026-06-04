@@ -19,7 +19,6 @@ from __future__ import annotations
 import dataclasses
 import logging
 import threading
-from typing import Union
 
 import numpy as np
 
