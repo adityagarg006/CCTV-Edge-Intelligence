@@ -35,11 +35,17 @@ FRAME_SKIP: int = int(os.getenv("FRAME_SKIP", "1"))
 FRAME_QUEUE_MAXSIZE: int = int(os.getenv("FRAME_QUEUE_MAXSIZE", "32"))
 
 # --- Re-ID ---
-# L2 distance threshold. Lower = stricter identity matching (fewer false re-IDs).
-# Typical range: 0.5 (strict) – 0.9 (lenient).
-REID_DISTANCE_THRESHOLD: float = float(os.getenv("REID_DISTANCE_THRESHOLD", "0.7"))
+# L2 distance threshold for gallery matching.
+# MobileNetV3 fallback (no torchreid): co-occurring different people can be as
+# close as 0.55 in embedding space. Active-exclusion filtering handles the
+# "two people visible at once" case, but we still need a tight threshold for
+# cases where two people who have both left the scene are later compared.
+# 0.50 keeps same-person matches (~0.45 typical) while rejecting most false
+# positives. With OSNet installed, raise this to 0.65–0.70.
+REID_DISTANCE_THRESHOLD: float = float(os.getenv("REID_DISTANCE_THRESHOLD", "0.50"))
 # EMA alpha for gallery updates [0–1]. Higher = gallery changes slowly (stable but slow to adapt).
-REID_EMA_ALPHA: float = float(os.getenv("REID_EMA_ALPHA", "0.9"))
+# Lowered from 0.9 to 0.7 so the gallery adapts faster to pose/lighting changes.
+REID_EMA_ALPHA: float = float(os.getenv("REID_EMA_ALPHA", "0.7"))
 # Update gallery every N frames per track. Lower = fresher embeddings, higher CPU.
 REID_GALLERY_UPDATE_FREQ: int = int(os.getenv("REID_GALLERY_UPDATE_FREQ", "5"))
 

@@ -102,6 +102,15 @@ class AsyncVideoReader:
         """
         return self._queue.qsize()
 
+    def is_done(self) -> bool:
+        """Return True when the producer thread has stopped and the queue is drained.
+
+        A False read() while is_done() is False means the queue is momentarily
+        empty (producer still running) — the consumer should wait and retry.
+        A False read() while is_done() is True means the source is exhausted.
+        """
+        return self._stop_event.is_set() and self._queue.empty()
+
     def __enter__(self) -> "AsyncVideoReader":
         return self
 
@@ -148,17 +157,32 @@ class AsyncVideoReader:
                     break
                 continue
 
-            # Drop-oldest strategy: if the queue is full, remove the stale
-            # front element before inserting the fresh frame.
-            if self._queue.full():
+            if self._is_file():
+                # File source: block until the consumer makes room.
+                # Dropping frames from a recorded file has no benefit —
+                # there is no "staleness" concern, and the user expects every
+                # frame to be processed. The producer naturally paces itself
+                # to the consumer rate instead of racing ahead.
                 try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass  # Another consumer drained it between our check and get.
-            try:
-                self._queue.put_nowait(frame)
-            except queue.Full:
-                pass  # Extremely rare race; skip this frame rather than block.
+                    self._queue.put(frame, timeout=1.0)
+                except queue.Full:
+                    # Consumer is stuck (e.g. shutdown in progress); skip.
+                    if self._stop_event.is_set():
+                        break
+            else:
+                # Live source (RTSP / webcam): drop-oldest strategy keeps the
+                # pipeline working on the freshest available frame. Staleness
+                # matters here — a lagging consumer should see current reality,
+                # not frames from seconds ago.
+                if self._queue.full():
+                    try:
+                        self._queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                try:
+                    self._queue.put_nowait(frame)
+                except queue.Full:
+                    pass  # Rare race; skip rather than block.
 
         cap.release()
         logger.debug("Producer thread exiting.")

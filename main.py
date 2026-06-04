@@ -18,11 +18,12 @@ from collections import deque
 from threading import Event
 
 import cv2
+import numpy as np
 
 from config import settings
 from src.analytics import AnalyticsReporter
 from src.database import TrackingDatabase
-from src.detector import PersonDetector
+from src.detector import Detection, PersonDetector
 from src.feature_bank import FeatureBank
 from src.metrics import MetricsCollector
 from src.reid_encoder import ReIDEncoder
@@ -73,6 +74,32 @@ def _parse_args() -> argparse.Namespace:
         default=settings.LOG_LEVEL,
         help="Logging verbosity. (default: %(default)s)",
     )
+    parser.add_argument(
+        "--save-video",
+        action="store_true",
+        help="Save annotated output to an MP4 file inside --output-dir.",
+    )
+    parser.add_argument(
+        "--inference-width",
+        type=int,
+        default=1280,
+        help=(
+            "Resize frames to this width before YOLO+ReID inference. "
+            "Dramatically reduces inference time on high-res sources (e.g. 4K). "
+            "Bounding boxes are scaled back to original coordinates automatically. "
+            "Use 0 to disable. (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--output-width",
+        type=int,
+        default=1280,
+        help=(
+            "Resize annotated frames to this width before saving. "
+            "Height is scaled proportionally. Use 0 to keep original resolution. "
+            "(default: %(default)s)"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -115,6 +142,46 @@ def _build_signal_handler(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _resize_for_output(frame: np.ndarray, target_width: int) -> np.ndarray:
+    """Resize frame to target_width, preserving aspect ratio.
+
+    Args:
+        frame: BGR frame.
+        target_width: Desired output width in pixels. 0 = no resize.
+
+    Returns:
+        Resized frame, or the original if target_width is 0 or already smaller.
+    """
+    if target_width <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    if w <= target_width:
+        return frame
+    scale = target_width / w
+    new_h = int(h * scale)
+    return cv2.resize(frame, (target_width, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _probe_fps(source: int | str, default: float = 30.0) -> float:
+    """Return the native FPS of a video source for VideoWriter initialisation.
+
+    Args:
+        source: Webcam index, file path, or RTSP URL.
+        default: Fallback FPS when the source reports 0 or is unavailable.
+
+    Returns:
+        Frames-per-second as a float.
+    """
+    cap = cv2.VideoCapture(source)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return fps if fps and fps > 0 else default
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -132,6 +199,9 @@ def main() -> int:
 
     device = auto_select_device() if args.device == "auto" else args.device
     display = not args.no_display and settings.DISPLAY_OUTPUT
+
+    # Probe source FPS for the VideoWriter (needed before frames arrive).
+    source_fps = _probe_fps(source)
 
     # Initialise all components.
     metrics = MetricsCollector()
@@ -169,16 +239,33 @@ def main() -> int:
             # Rolling FPS window over the last 30 frame timestamps.
             ts_window: deque[float] = deque(maxlen=30)
 
+            # VideoWriter — lazily initialised on the first annotated frame
+            # so we know the exact frame dimensions.
+            video_writer: cv2.VideoWriter | None = None
+            video_out_path: str | None = None
+            if args.save_video:
+                import os as _os
+                _os.makedirs(args.output_dir, exist_ok=True)
+                from datetime import datetime as _dt
+                _ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                video_out_path = _os.path.join(args.output_dir, f"annotated_{_ts}.mp4")
+
             while not _shutdown_event.is_set():
                 ok, frame = reader.read()
 
                 if not ok:
                     if _shutdown_event.is_set():
                         break
-                    # Source exhausted or frame queue empty — distinguish.
                     if isinstance(source, str) and not source.lower().startswith("rtsp://"):
-                        logger.info("Video file ended. Exiting main loop.")
-                        break
+                        # File source: only exit when the producer has finished AND
+                        # the queue is drained. A False read while the producer is
+                        # still running just means the queue is momentarily empty
+                        # (e.g. the VideoCapture open took longer than the 50ms
+                        # read() timeout on the first call).
+                        if reader.is_done():
+                            logger.info("Video file ended. Exiting main loop.")
+                            break
+                        continue
                     elif isinstance(source, str) and source.lower().startswith("rtsp://"):
                         logger.warning("RTSP frame unavailable (may be reconnecting). Waiting …")
                         time.sleep(0.05)
@@ -192,30 +279,103 @@ def main() -> int:
                 timestamp = time.time()
                 frame_id += 1
 
-                # 1. Detection + tracking.
-                detections = detector.detect(frame)
+                # 1. Optionally resize for inference.
+                # High-res sources (e.g. 4K) cause the queue to drop frames because
+                # inference is slower than the source frame rate. Resizing to ~1280px
+                # wide brings inference time under the inter-frame interval so the
+                # consumer can keep up with the producer.
+                orig_h, orig_w = frame.shape[:2]
+                if args.inference_width > 0 and orig_w > args.inference_width:
+                    scale_x = orig_w / args.inference_width
+                    scale_y = orig_h / int(orig_h * args.inference_width / orig_w)
+                    inf_frame = cv2.resize(
+                        frame,
+                        (args.inference_width, int(orig_h * args.inference_width / orig_w)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                else:
+                    inf_frame = frame
+                    scale_x = 1.0
+                    scale_y = 1.0
 
-                # 2. Crop extraction and Re-ID encoding.
+                # 2. Detection + tracking (on inference-resolution frame).
+                detections = detector.detect(inf_frame)
+
+                # Scale bboxes back to original-frame coordinates so DB logs and
+                # annotations are in the correct pixel space.
+                if scale_x != 1.0:
+                    detections = [
+                        Detection(
+                            track_id=d.track_id,
+                            bbox_xyxy=np.array(
+                                [
+                                    d.bbox_xyxy[0] * scale_x,
+                                    d.bbox_xyxy[1] * scale_y,
+                                    d.bbox_xyxy[2] * scale_x,
+                                    d.bbox_xyxy[3] * scale_y,
+                                ],
+                                dtype=np.float32,
+                            ),
+                            confidence=d.confidence,
+                            class_id=d.class_id,
+                        )
+                        for d in detections
+                    ]
+
+                # 3. Crop extraction and Re-ID encoding (on original-res frame).
                 valid_detections, crops = extract_crops(frame, detections)
                 embeddings = reid_encoder.encode_batch(crops)
 
-                # 3. Gallery update, identity assignment, DB logging.
+                # 4. Identity assignment and gallery management.
+                #
+                # Gallery keys are always reid_ids — never track_ids.
+                #
+                # Two-path logic:
+                #   Continuing track  → reid_id already known, refresh gallery entry.
+                #   New/returning track → query gallery with active-exclusion filter.
+                #
+                # Active-exclusion: when a new track_id appears, we exclude from the
+                # query any reid_id that is already claimed by a *currently visible*
+                # person in this frame. Without this, T5 (new person) could match
+                # T1's gallery entry even though T1 is standing right next to them —
+                # two simultaneously visible people would share the same reid_id.
+                # A returning person's reid_id is safe to match because their track
+                # was lost (they are NOT in the current frame's active set).
+                active_reid_ids: set[int] = {
+                    reid_assignments[tid]
+                    for tid in (d.track_id for d in valid_detections)
+                    if tid in reid_assignments
+                }
+
                 for det, embedding in zip(valid_detections, embeddings):
-                    if frame_id % settings.REID_GALLERY_UPDATE_FREQ == 0:
-                        feature_bank.update(det.track_id, embedding)
-
-                    results = feature_bank.query(embedding, k=1)
-
-                    if results and results[0][1] <= settings.REID_DISTANCE_THRESHOLD:
-                        reid_id = results[0][0]
+                    if det.track_id in reid_assignments:
+                        reid_id = reid_assignments[det.track_id]
+                        if frame_id % settings.REID_GALLERY_UPDATE_FREQ == 0:
+                            feature_bank.update(reid_id, embedding)
                         metrics.record_reid(hit=True)
                     else:
-                        reid_id = next_reid_id
-                        next_reid_id += 1
-                        feature_bank.update(reid_id, embedding)
-                        metrics.record_reid(hit=False)
+                        # Query gallery, then filter out reid_ids that are already
+                        # claimed by someone currently visible in this frame.
+                        candidates = feature_bank.query(embedding, k=5)
+                        candidates = [
+                            (rid, dist) for rid, dist in candidates
+                            if rid not in active_reid_ids
+                        ]
 
-                    reid_assignments[det.track_id] = reid_id
+                        if candidates and candidates[0][1] <= settings.REID_DISTANCE_THRESHOLD:
+                            reid_id = candidates[0][0]
+                            metrics.record_reid(hit=True)
+                        else:
+                            reid_id = next_reid_id
+                            next_reid_id += 1
+                            metrics.record_reid(hit=False)
+
+                        feature_bank.update(reid_id, embedding)
+                        reid_assignments[det.track_id] = reid_id
+                        # Add this new assignment to the active set so later
+                        # iterations in this same frame respect it.
+                        active_reid_ids.add(reid_id)
+
                     db.log_detection(frame_id, timestamp, det, reid_id)
                     db.upsert_identity(reid_id, timestamp, det.confidence)
 
@@ -226,8 +386,8 @@ def main() -> int:
                 fps = len(ts_window) / (ts_window[-1] - ts_window[0] + 1e-9) if len(ts_window) > 1 else 0.0
                 metrics.record_frame(latency_ms, fps, reader.qsize())
 
-                # 5. Display.
-                if display:
+                # 5. Annotate, display, and/or save video.
+                if display or args.save_video:
                     annotated = annotate_frame(
                         frame.copy(),
                         detections,
@@ -237,12 +397,29 @@ def main() -> int:
                         settings.FRAME_QUEUE_MAXSIZE,
                         gallery_size=feature_bank.size(),
                     )
-                    cv2.imshow("CCTV-Edge-Intelligence", annotated)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord("q"):
-                        logger.info("User pressed 'q'. Shutting down.")
-                        _shutdown_event.set()
-                        break
+
+                    if args.save_video and video_out_path is not None:
+                        out_frame = _resize_for_output(annotated, args.output_width)
+                        # Initialise writer on the first frame once we know exact dimensions.
+                        if video_writer is None:
+                            oh, ow = out_frame.shape[:2]
+                            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                            video_writer = cv2.VideoWriter(
+                                video_out_path, fourcc, source_fps, (ow, oh)
+                            )
+                            logger.info(
+                                "VideoWriter opened: %s  (%dx%d @ %.1f fps)",
+                                video_out_path, ow, oh, source_fps,
+                            )
+                        video_writer.write(out_frame)
+
+                    if display:
+                        cv2.imshow("CCTV-Edge-Intelligence", annotated)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord("q"):
+                            logger.info("User pressed 'q'. Shutting down.")
+                            _shutdown_event.set()
+                            break
 
                 # 6. Console heartbeat every 30 frames.
                 if frame_id % 30 == 0:
@@ -256,6 +433,10 @@ def main() -> int:
         if display:
             cv2.destroyAllWindows()
 
+        if video_writer is not None:
+            video_writer.release()
+            logger.info("Annotated video saved to %s", video_out_path)
+
         # Final report (if not already triggered by signal handler).
         if not _shutdown_triggered:
             try:
@@ -264,6 +445,8 @@ def main() -> int:
                 for key, value in metrics.summary().items():
                     print(f"  {key}: {value}")
                 print(f"\nReports: {list(paths.values())}")
+                if video_out_path:
+                    print(f"  Annotated video: {video_out_path}")
             except Exception as exc:
                 logger.error("Failed to generate final report: %s", exc)
 
